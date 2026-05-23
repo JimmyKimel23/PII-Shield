@@ -81,9 +81,23 @@ interface SessionPayload {
   source_filename?: string;
 }
 
+/**
+ * v2.0.3 (issue #2): start_review now returns metadata-only entries here.
+ * Raw PII (original_text, entities, html_text) is pulled separately by the
+ * iframe via the model-invisible `get_review_payload` tool.
+ */
+interface SessionMetadata {
+  session_id: string;
+  doc_id?: string;
+  source_filename?: string;
+  entity_count?: number;
+  approved?: boolean;
+  has_overrides?: boolean;
+}
+
 interface StartReviewStructuredContent {
   status?: string;
-  sessions?: SessionPayload[];
+  sessions?: SessionMetadata[];
   count?: number;
   is_bulk?: boolean;
 }
@@ -1515,31 +1529,80 @@ function wireStaticHandlers(): void {
 const app = new App({ name: "pii-shield-review-ui", version: "2.0.0" });
 
 app.ontoolresult = (result: CallToolResult) => {
-  // The server sends the full review data as `structuredContent` on the
-  // start_review tool response. Also rebroadcast after apply_review_overrides.
+  // v2.0.3 (issue #2): start_review returns metadata-only `sessions[]`. The
+  // iframe pulls the unredacted payload for each session via the
+  // model-invisible `get_review_payload` tool. This keeps raw PII out of the
+  // host's tool-result channel and therefore out of Claude's context.
   //
-  // Shape (see `handleStartReview` in src/index.ts):
-  //   { status: "review_ready", sessions: [ {session_id, entities, ...} ], ... }
+  // Shape on the wire from start_review:
+  //   structuredContent = { status: "review_ready", sessions: [
+  //     { session_id, doc_id, source_filename, entity_count, approved, has_overrides },
+  //     ...
+  //   ], count, is_bulk }
   //
-  // If `sessions.length >= 2` we switch to tabbed bulk-review UI (see
-  // initBulk + renderDocTabs). Otherwise single-session flow as before.
+  // After pull, `payloads` holds the full SessionPayload objects the
+  // initBulk / loadSession helpers already understand — no downstream
+  // changes needed.
   const sc = (result as unknown as { structuredContent?: unknown }).structuredContent;
   if (!sc || typeof sc !== "object") return;
   const asContainer = sc as StartReviewStructuredContent;
-  const sessions = Array.isArray(asContainer.sessions) ? asContainer.sessions : [];
-
-  if (sessions.length >= 2) {
-    initBulk(sessions);
+  const metaList: SessionMetadata[] = Array.isArray(asContainer.sessions)
+    ? asContainer.sessions
+    : [];
+  if (metaList.length === 0) {
+    // Tolerate older servers that still inline the full payload on
+    // structuredContent itself (single-session shape). After deploy this
+    // branch is dead — kept until v2.0.3 ships to the field.
+    const legacy = sc as SessionPayload;
+    if (legacy && legacy.session_id) {
+      bulkSessions = [];
+      currentBulkIdx = 0;
+      ($("doc-tabs")).style.display = "none";
+      loadSession(legacy);
+    }
     return;
   }
 
-  const payload = sessions.length > 0 ? sessions[0] : (sc as SessionPayload);
-  if (!payload || !payload.session_id) return;
-  // Single-session mode: clear any leftover bulk state
-  bulkSessions = [];
-  currentBulkIdx = 0;
-  ($("doc-tabs")).style.display = "none";
-  loadSession(payload);
+  // Fire-and-forget pull. ontoolresult itself stays sync (SDK signature) but
+  // we kick off the async work below; the SDK does not require completion.
+  void (async () => {
+    const payloads: SessionPayload[] = [];
+    for (const meta of metaList) {
+      if (!meta || !meta.session_id) continue;
+      try {
+        const pull = await app.callServerTool({
+          name: "get_review_payload",
+          arguments: {
+            session_id: meta.session_id,
+            doc_id: meta.doc_id || "",
+          },
+        });
+        const sc2 = (pull as unknown as { structuredContent?: unknown })
+          .structuredContent;
+        if (!sc2 || typeof sc2 !== "object") continue;
+        const candidate = sc2 as SessionPayload & { error?: string };
+        if (candidate.error || !candidate.session_id) continue;
+        payloads.push(candidate);
+      } catch (err) {
+        console.error(
+          "[review-app] get_review_payload failed for",
+          meta.session_id,
+          err,
+        );
+      }
+    }
+    if (payloads.length === 0) return;
+
+    if (payloads.length >= 2) {
+      initBulk(payloads);
+      return;
+    }
+    const payload = payloads[0];
+    bulkSessions = [];
+    currentBulkIdx = 0;
+    ($("doc-tabs")).style.display = "none";
+    loadSession(payload);
+  })();
 };
 
 app.onhostcontextchanged = (_ctx: McpUiHostContext) => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * PII Shield v2.0.2 — stdio protocol smoke test.
+ * PII Shield v2.0.4 — stdio protocol smoke test.
  *
  * Validates that the MCP server, in isolation from any host, returns the
  * exact envelope shapes required by the MCP Apps spec (2026-01-26) for
@@ -16,21 +16,35 @@
  *      spec AND the deprecated flat `_meta["ui/resourceUri"]` key that
  *      older Claude Desktop builds read). Emission is library-managed
  *      by `registerAppTool` in `@modelcontextprotocol/ext-apps`.
- *   3. `tools/list` includes `apply_review_overrides` as a plain tool
- *      (no `_meta.ui` expected — it's not a UI-resource-bearing tool).
- *   4. `resources/list` includes `ui://pii-shield/review.html` with
+ *   3. `tools/list` includes `apply_review_overrides` with the FULL
+ *      MCP Apps descriptor: `_meta.ui.resourceUri` matches the review
+ *      panel AND `_meta.ui.visibility === ["app"]`. v2.0.4 (issue #2)
+ *      — v2.0.3 shipped this tool with only `visibility:["app"]` and
+ *      no resourceUri, which Claude Desktop silently dropped on
+ *      iframe→server proxy. Full descriptor mirrors get_review_payload
+ *      (which works) and restores the Approve flow.
+ *   4. `tools/list` includes `get_review_payload` with
+ *      `_meta.ui.visibility: ["app"]` and the same review resourceUri
+ *      (v2.0.3 / issue #2 — model-invisible pull tool).
+ *   5. `resources/list` includes `ui://pii-shield/review.html` with
  *      mimeType `text/html;profile=mcp-app`.
- *   5. `resources/read` on that URI returns HTML >1 KB starting with
+ *   6. `resources/read` on that URI returns HTML >1 KB starting with
  *      `<!DOCTYPE html>` and containing the review shell's topbar text
  *      ("PII Shield Review") — proves the single-file Vite bundle is
  *      actually inlined into server.bundle.mjs.
- *   6. `tools/call start_review` (with no session_id) returns a
+ *   7. `tools/call start_review` (with no session_id) returns a
  *      well-formed envelope. Since no `anonymize_file` has run, it
  *      SHOULD return `structuredContent.status === "error"` with a
  *      human message — that's still a valid MCP response shape.
- *   7. `tools/call apply_review_overrides` with a non-existent
+ *   8. `tools/call apply_review_overrides` with a non-existent
  *      session_id returns a cleanly-shaped error in content[0].text
  *      (no crash, no malformed envelope).
+ *   9. PII-leak canary (v2.0.3 / issue #2):
+ *      `anonymize_text` on text with known canary substrings →
+ *      `start_review` on the resulting session → the full response
+ *      JSON must NOT contain ANY canary substring; structuredContent
+ *      .sessions[0] must be a metadata-only shape; the raw payload
+ *      must be reachable via `get_review_payload`.
  */
 
 import { spawn } from "node:child_process";
@@ -135,21 +149,50 @@ async function main() {
         `flat _meta["ui/resourceUri"] = ${REVIEW_URI}`,
     );
 
-    // ─── 3. tools/list — apply_review_overrides is a plain tool ────────────
+    // ─── 3. tools/list — apply_review_overrides full MCP Apps descriptor ───
+    // v2.0.4 (issue #2): must carry both resourceUri AND visibility:["app"].
+    // Without the resourceUri (v2.0.3 shape), Claude Desktop dropped the
+    // iframe→server proxy on app.callServerTool("apply_review_overrides"),
+    // breaking the Approve flow. Mirror get_review_payload's full descriptor.
     const applyOverrides = toolsList.result.tools.find(
       (t) => t.name === "apply_review_overrides",
     );
     must(applyOverrides, "apply_review_overrides not in tools/list");
-    // Plain tools should NOT carry _meta.ui.* keys.
     must(
-      !applyOverrides._meta?.ui,
-      `apply_review_overrides unexpectedly has _meta.ui: ${JSON.stringify(applyOverrides._meta)}`,
+      applyOverrides._meta?.ui?.resourceUri === REVIEW_URI,
+      `apply_review_overrides._meta.ui.resourceUri MUST be ${REVIEW_URI}, got: ${JSON.stringify(applyOverrides._meta)}`,
+    );
+    const aoVis = applyOverrides._meta?.ui?.visibility;
+    must(
+      Array.isArray(aoVis) && aoVis.length === 1 && aoVis[0] === "app",
+      `apply_review_overrides _meta.ui.visibility MUST be ["app"], got: ${JSON.stringify(applyOverrides._meta)}`,
     );
     console.log(
-      `✓ tools/list: apply_review_overrides present as plain tool (no _meta.ui)`,
+      `✓ tools/list: apply_review_overrides has full MCP Apps descriptor (resourceUri + visibility=["app"])`,
     );
 
-    // ─── 4. resources/list — ui://pii-shield/review.html ───────────────────
+    // ─── 4. tools/list — get_review_payload is model-invisible pull tool ───
+    // v2.0.3 (issue #2): iframe-only tool that returns the unredacted
+    // payload. MUST carry visibility:["app"] so compliant hosts hide it
+    // from the agent's tools/list.
+    const getReviewPayload = toolsList.result.tools.find(
+      (t) => t.name === "get_review_payload",
+    );
+    must(getReviewPayload, "get_review_payload not in tools/list");
+    must(
+      getReviewPayload._meta?.ui?.resourceUri === REVIEW_URI,
+      `get_review_payload._meta.ui.resourceUri wrong: ${JSON.stringify(getReviewPayload._meta)}`,
+    );
+    const grpVis = getReviewPayload._meta?.ui?.visibility;
+    must(
+      Array.isArray(grpVis) && grpVis.length === 1 && grpVis[0] === "app",
+      `get_review_payload _meta.ui.visibility MUST be ["app"], got: ${JSON.stringify(getReviewPayload._meta)}`,
+    );
+    console.log(
+      `✓ tools/list: get_review_payload has _meta.ui.visibility=["app"] (model-invisible pull tool)`,
+    );
+
+    // ─── 5. resources/list — ui://pii-shield/review.html ───────────────────
     const resList = await rpc("resources/list", {});
     const uiRes = resList.result?.resources?.find((r) => r.uri === REVIEW_URI);
     must(uiRes, `UI resource ${REVIEW_URI} not in resources/list`);
@@ -159,7 +202,7 @@ async function main() {
     );
     console.log(`✓ resources/list: ${uiRes.uri} (mime=${uiRes.mimeType})`);
 
-    // ─── 5. resources/read — HTML is inlined & non-trivial ─────────────────
+    // ─── 6. resources/read — HTML is inlined & non-trivial ─────────────────
     const read = await rpc("resources/read", { uri: REVIEW_URI });
     must(
       read.result?.contents?.length === 1,
@@ -187,7 +230,7 @@ async function main() {
         `contains topbar title`,
     );
 
-    // ─── 6. tools/call start_review — no session, but well-formed ──────────
+    // ─── 7. tools/call start_review — no session, but well-formed ──────────
     const startCall = await rpc("tools/call", {
       name: "start_review",
       arguments: {},
@@ -213,7 +256,7 @@ async function main() {
         `(status="${sc.status}", content[0].text[0..60]="${scRes.content[0].text.slice(0, 60)}…")`,
     );
 
-    // ─── 7. tools/call apply_review_overrides — bad session, clean error ───
+    // ─── 8. tools/call apply_review_overrides — bad session, clean error ───
     const applyCall = await rpc("tools/call", {
       name: "apply_review_overrides",
       arguments: {
@@ -248,7 +291,116 @@ async function main() {
         `(body[0..80]="${bodyText.slice(0, 80)}…")`,
     );
 
-console.log("\nPASS — all 7 PII Shield v2.0.2 protocol checks green.");
+    // ─── 9. PII-leak canary (issue #2) ──────────────────────────────────────
+    // Goal: any PII a user feeds into anonymize_* must NEVER appear in the
+    // start_review tool result, because that result reaches Claude before
+    // the HITL approval step. Raw PII lives only behind the model-invisible
+    // `get_review_payload` tool.
+    //
+    // Canaries chosen so the engine detects at least one of them with
+    // pattern-only matching (no NER required — important because the smoke
+    // test must work even before the NER model is installed):
+    //   - email pattern → guaranteed regex hit
+    //   - phone pattern → likely regex hit
+    //   - name token   → may or may not hit depending on NER state; we
+    //                    only assert it's ABSENT from start_review's
+    //                    response, not that it was detected.
+    const CANARY_NAME = "Zylphrindor_Vexnoth";
+    const CANARY_EMAIL = "canary-zylphrindor@pii-shield-smoke.invalid";
+    const CANARY_PHONE = "+1-555-013-4291";
+    const canaryDoc =
+      `Confidential note. Author: ${CANARY_NAME}. ` +
+      `Contact: ${CANARY_EMAIL} or ${CANARY_PHONE}. End.`;
+
+    let canaryRanFull = false;
+    let canarySid = "";
+    try {
+      const anonCall = await rpc("tools/call", {
+        name: "anonymize_text",
+        arguments: { text: canaryDoc, language: "en" },
+      });
+      const anonText = anonCall.result?.content?.[0]?.text || "";
+      let anonParsed = null;
+      try { anonParsed = JSON.parse(anonText); } catch { /* tolerate */ }
+      canarySid = anonParsed?.session_id || "";
+      if (canarySid) {
+        canaryRanFull = true;
+        console.log(`  · anonymize_text seeded session ${canarySid} for canary check`);
+      } else {
+        console.log(`  · anonymize_text did not return session_id (NER may be loading); skipping deep canary check`);
+      }
+    } catch (err) {
+      console.log(`  · anonymize_text unavailable in smoke env (${err.message}); skipping deep canary check`);
+    }
+
+    if (canaryRanFull) {
+      // 9a. start_review on the seeded session — full response body must
+      // contain ZERO canary substrings.
+      const sr2 = await rpc("tools/call", {
+        name: "start_review",
+        arguments: { session_id: canarySid },
+      });
+      const sr2Full = JSON.stringify(sr2.result || {});
+      for (const canary of [CANARY_NAME, CANARY_EMAIL, CANARY_PHONE]) {
+        must(
+          !sr2Full.includes(canary),
+          `LEAK: start_review response contains canary substring "${canary}". This is the issue #2 regression — start_review must be metadata-only.`,
+        );
+      }
+      console.log(`✓ tools/call start_review: no canary PII in response body (${sr2Full.length} bytes scanned)`);
+
+      // 9b. structuredContent.sessions[0] must be a metadata-only shape.
+      const sr2Sc = sr2.result?.structuredContent;
+      const sr2Sessions = Array.isArray(sr2Sc?.sessions) ? sr2Sc.sessions : [];
+      must(
+        sr2Sessions.length === 1,
+        `start_review should return 1 session for the canary session_id, got ${sr2Sessions.length}`,
+      );
+      const sess0 = sr2Sessions[0];
+      const allowedKeys = new Set([
+        "session_id", "doc_id", "source_filename",
+        "entity_count", "approved", "has_overrides",
+      ]);
+      const forbiddenKeys = ["original_text", "entities", "anonymized_text", "html_text", "overrides"];
+      for (const fk of forbiddenKeys) {
+        must(
+          !(fk in sess0),
+          `LEAK: start_review sessions[0] still carries forbidden field "${fk}". Issue #2 regression.`,
+        );
+      }
+      for (const k of Object.keys(sess0)) {
+        must(
+          allowedKeys.has(k),
+          `start_review sessions[0] has unexpected key "${k}" — extend allowedKeys if intentional, or remove from response.`,
+        );
+      }
+      console.log(`✓ start_review sessions[0] is metadata-only: keys=[${Object.keys(sess0).join(", ")}]`);
+
+      // 9c. get_review_payload directly — iframe channel must still
+      // surface the unredacted text (otherwise the panel is broken).
+      const grpCall = await rpc("tools/call", {
+        name: "get_review_payload",
+        arguments: { session_id: canarySid, doc_id: "" },
+      });
+      const grpSc = grpCall.result?.structuredContent;
+      must(
+        grpSc && typeof grpSc === "object" && grpSc.session_id === canarySid,
+        `get_review_payload did not return a payload for session ${canarySid}: ${JSON.stringify(grpCall.result).slice(0, 200)}`,
+      );
+      must(
+        typeof grpSc.original_text === "string" && grpSc.original_text.includes(CANARY_EMAIL),
+        `get_review_payload.original_text missing canary email — iframe channel is broken`,
+      );
+      // content[0].text must be empty — defense in depth.
+      const grpContentText = grpCall.result?.content?.[0]?.text;
+      must(
+        grpContentText === "",
+        `get_review_payload content[0].text MUST be empty (defense in depth), got: ${JSON.stringify(grpContentText).slice(0, 80)}`,
+      );
+      console.log(`✓ tools/call get_review_payload: returns unredacted payload via structuredContent only (content[0].text="")`);
+    }
+
+    console.log("\nPASS — all PII Shield v2.0.4 protocol checks green.");
     console.log(
       "       MCP Apps wiring: start_review descriptor carries dual-key resourceUri,",
     );
@@ -256,8 +408,20 @@ console.log("\nPASS — all 7 PII Shield v2.0.2 protocol checks green.");
       `       ${REVIEW_URI} resource returns the Vite single-file HTML,`,
     );
     console.log(
-      "       apply_review_overrides plain tool handles bad inputs without crashing.",
+      "       apply_review_overrides + get_review_payload both carry the full",
     );
+    console.log(
+      "       MCP Apps descriptor (resourceUri + visibility:['app']),",
+    );
+    if (canaryRanFull) {
+      console.log(
+        "       start_review never leaks raw PII into the host channel (issue #2 closed).",
+      );
+    } else {
+      console.log(
+        "       (Deep canary skipped — anonymize_text unavailable in this smoke env.)",
+      );
+    }
   } finally {
     child.kill("SIGTERM");
     await new Promise((r) => setTimeout(r, 300));

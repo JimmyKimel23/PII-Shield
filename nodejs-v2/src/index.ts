@@ -1168,16 +1168,26 @@ async function handleAnonymizeDocx(args: ToolArgs): Promise<string> {
     docx_output_path_original: docxOutPath,
     added_at: Date.now(),
   });
-  // Augment the raw result with relative paths so in-VM callers can read
-  // without host↔VM string-replace.
-  const augmented: Record<string, unknown> = { ...(result as Record<string, unknown>) };
+  // v2.0.3 (issue #2): return only path/count metadata — never spread the
+  // raw `result` (which contains `original_text`, `entities`, `html_text`).
+  // The unredacted payload lives in the local review store and is fetched
+  // by the iframe through `get_review_payload` (visibility: ["app"]).
+  const safeReturn: Record<string, unknown> = {
+    status: "success",
+    session_id: docxSid,
+    source_filename: path.basename(resolved),
+    entity_count: Array.isArray(result.entities) ? (result.entities as unknown[]).length : 0,
+    docx_output_path: docxOutPath,
+    text_output_path: textOutPath,
+    note: "Anonymization complete. Run start_review to inspect entities through the HITL panel — do NOT read the original file.",
+  };
   if (docxOutPath) {
-    augmented.docx_output_rel_path = path.relative(inputDir, docxOutPath).split(path.sep).join("/");
+    safeReturn.docx_output_rel_path = path.relative(inputDir, docxOutPath).split(path.sep).join("/");
   }
   if (textOutPath) {
-    augmented.output_rel_path = path.relative(inputDir, textOutPath).split(path.sep).join("/");
+    safeReturn.output_rel_path = path.relative(inputDir, textOutPath).split(path.sep).join("/");
   }
-  return JSON.stringify(augmented, null, 2);
+  return JSON.stringify(safeReturn, null, 2);
 }
 
 async function handleDeanonymizeDocx(args: ToolArgs): Promise<string> {
@@ -1478,8 +1488,15 @@ async function handleApplyReviewOverrides(args: ToolArgs): Promise<string> {
 }
 
 // ── start_review (MCP Apps tool) ─────────────────────────────────────────────
-// Opens the in-chat review iframe. The UI iframe gets the review data via the
-// tool's `structuredContent` — no HTTP, no file pickup, no browser.
+// Opens the in-chat review iframe.
+//
+// v2.0.3 (issue #2): `structuredContent.sessions[]` carries only metadata
+// (session_id / doc_id / source_filename / entity_count / approved /
+// has_overrides). Raw PII (`original_text`, `entities[].text`, `html_text`)
+// is NEVER returned by this tool — it is pulled by the iframe through the
+// model-invisible `get_review_payload` tool after `ui/initialize`. This
+// prevents the host from ever placing the unredacted document in the
+// model's context before the HITL approval step.
 
 async function handleStartReview(args: ToolArgs): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -1520,16 +1537,19 @@ async function handleStartReview(args: ToolArgs): Promise<{
     }
     validSessionIds.push(sid);
     for (const doc of data.documents) {
+      // v2.0.3 (issue #2): metadata-only. No `original_text`, no `entities`,
+      // no `html_text`, no `overrides` — the iframe pulls those from
+      // `get_review_payload` (visibility: ["app"]) after it mounts.
+      const overrides = doc.overrides || { remove: [], add: [] };
       reviewPayloads.push({
         session_id: sid,
         doc_id: doc.doc_id,
-        entities: doc.entities || [],
-        original_text: doc.original_text || "",
-        anonymized_text: doc.anonymized_text || "",
-        html_text: doc.html_text || "",
-        overrides: doc.overrides || { remove: [], add: [] },
-        approved: !!doc.approved,
         source_filename: doc.source_filename || sid,
+        entity_count: Array.isArray(doc.entities) ? doc.entities.length : 0,
+        approved: !!doc.approved,
+        has_overrides:
+          (Array.isArray(overrides.remove) && overrides.remove.length > 0) ||
+          (Array.isArray(overrides.add) && overrides.add.length > 0),
       });
     }
   }
@@ -1728,26 +1748,70 @@ server.registerTool("apply_tracked_changes", {
   },
 }, wrapPlainTool("apply_tracked_changes", handleApplyTrackedChanges));
 
-server.registerTool("apply_review_overrides", {
-  title: "Apply review overrides",
-  description:
-    "Apply the user's HITL review decisions (typically called by the in-chat review iframe on Approve). " +
-    "Takes `session_id` and an `overrides` object with `remove` (indices) and `add` (new entities). " +
-    "For multi-document sessions (one session_id with N docs), pass `doc_id` to target a specific document's review — omit for legacy single-doc sessions.",
-  inputSchema: {
-    session_id: z.string().describe("Review session id"),
-    doc_id: z.string().default("").describe("Optional per-document review id within a multi-file session. Omit for legacy single-doc sessions — applies to the first document."),
-    overrides: z.object({
-      remove: z.array(z.number()).optional(),
-      add: z.array(z.object({
-        text: z.string(),
-        type: z.string(),
-        start: z.number().optional(),
-        end: z.number().optional(),
-      })).optional(),
-    }).default({}).describe("User's add/remove decisions from the review panel"),
+// v2.0.4 (issue #2): apply_review_overrides is registered via registerAppTool
+// with the full MCP Apps descriptor (resourceUri + visibility: ["app"]). The
+// resourceUri matches start_review / get_review_payload so the host treats
+// this tool as part of the same review surface. Without the resourceUri (the
+// v2.0.3 shape), Claude Desktop dropped the iframe→server proxy call and the
+// Approve click silently failed.
+registerAppTool(server,
+  "apply_review_overrides",
+  {
+    title: "Apply review overrides",
+    description:
+      "Apply the user's HITL review decisions. Called exclusively by the in-chat " +
+      "review iframe when the user clicks Approve — never by the model. Takes " +
+      "`session_id` and an `overrides` object with `remove` (indices) and `add` " +
+      "(new entities). For multi-document sessions (one session_id with N docs), " +
+      "pass `doc_id` to target a specific document — omit for legacy single-doc " +
+      "sessions. Hidden from the agent via visibility: ['app'].",
+    inputSchema: {
+      session_id: z.string().describe("Review session id"),
+      doc_id: z.string().default("").describe("Optional per-document review id within a multi-file session. Omit for legacy single-doc sessions — applies to the first document."),
+      overrides: z.object({
+        remove: z.array(z.number()).optional(),
+        add: z.array(z.object({
+          text: z.string(),
+          type: z.string(),
+          start: z.number().optional(),
+          end: z.number().optional(),
+        })).optional(),
+      }).default({}).describe("User's add/remove decisions from the review panel"),
+    },
+    _meta: {
+      ui: {
+        resourceUri: REVIEW_RESOURCE_URI,
+        visibility: ["app"],
+      },
+    },
   },
-}, wrapPlainTool("apply_review_overrides", handleApplyReviewOverrides));
+  async (args) => {
+    const toolArgs = (args || {}) as ToolArgs;
+    touchBeaconToolCall("apply_review_overrides");
+    logToolCall("apply_review_overrides", toolArgs);
+    try {
+      const text = await handleApplyReviewOverrides(toolArgs);
+      logToolResponse("apply_review_overrides", text);
+      let structured: Record<string, unknown> = {};
+      try {
+        structured = JSON.parse(text);
+      } catch { /* leave as empty object — handler always returns valid JSON, this is defensive only */ }
+      return {
+        content: [{ type: "text" as const, text }],
+        structuredContent: structured,
+      };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logToolError("apply_review_overrides", error);
+      const errPayload = { status: "error", error: error.message };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(errPayload, null, 2) }],
+        structuredContent: errPayload,
+        isError: true,
+      };
+    }
+  },
+);
 
 server.registerTool("resolve_path", {
   title: "Resolve path",
@@ -1830,6 +1894,110 @@ registerAppTool(server,
         isError: true,
       };
     }
+  },
+);
+
+// ── get_review_payload — MCP Apps tool, model-invisible (issue #2) ──────────
+//
+// Called by the review iframe via `app.callServerTool()` after it mounts.
+// Returns the unredacted document data for a (session_id, doc_id) pair.
+//
+// Registered with `_meta.ui.visibility: ["app"]` — per MCP Apps spec, hosts
+// MUST exclude it from `tools/list` for the agent. The model literally cannot
+// see this tool, so its response (containing the raw PII the iframe needs)
+// never enters the model's context. The HITL approval gate is preserved.
+//
+// `_meta.ui.resourceUri` is still set so capable hosts recognise the call as
+// coming from the same review surface as `start_review`.
+
+registerAppTool(server,
+  "get_review_payload",
+  {
+    title: "Fetch unredacted review payload (iframe-only)",
+    description:
+      "Internal tool. Returns the unredacted document data (original text, " +
+      "entities with raw PII, html_text, overrides) for a single review " +
+      "document. Called by the in-chat HITL review iframe after it mounts. " +
+      "Hidden from the model via visibility: ['app'] — direct invocation by " +
+      "the agent is not supported.",
+    inputSchema: {
+      session_id: z.string().describe("Review session id"),
+      doc_id: z.string().default("").describe("Per-document review id within a multi-file session. Omit for legacy single-doc sessions — returns the first document."),
+    },
+    _meta: {
+      ui: {
+        resourceUri: REVIEW_RESOURCE_URI,
+        visibility: ["app"],
+      },
+    },
+  },
+  async (args) => {
+    const toolArgs = (args || {}) as ToolArgs;
+    touchBeaconToolCall("get_review_payload");
+    logToolCall("get_review_payload", toolArgs);
+    const sid = (toolArgs.session_id as string) || "";
+    const did = ((toolArgs.doc_id as string) || "").trim();
+    if (!sid) {
+      const errPayload = { error: "session_id is required" };
+      return {
+        content: [{ type: "text" as const, text: "" }],
+        structuredContent: errPayload,
+        isError: true,
+      };
+    }
+    const data = getReview(sid);
+    if (!data || !Array.isArray(data.documents) || data.documents.length === 0) {
+      const errPayload = { error: `No review session: ${sid}` };
+      logToolResponse("get_review_payload", JSON.stringify(errPayload));
+      return {
+        content: [{ type: "text" as const, text: "" }],
+        structuredContent: errPayload,
+        isError: true,
+      };
+    }
+    const doc = did
+      ? data.documents.find((d) => d.doc_id === did)
+      : data.documents[0];
+    if (!doc) {
+      const errPayload = {
+        error: `doc_id '${did}' not found in session ${sid}`,
+        available_doc_ids: data.documents.map((d) => d.doc_id),
+      };
+      logToolResponse("get_review_payload", JSON.stringify(errPayload));
+      return {
+        content: [{ type: "text" as const, text: "" }],
+        structuredContent: errPayload,
+        isError: true,
+      };
+    }
+    const payload = {
+      session_id: sid,
+      doc_id: doc.doc_id,
+      source_filename: doc.source_filename || sid,
+      entities: doc.entities || [],
+      original_text: doc.original_text || "",
+      anonymized_text: doc.anonymized_text || "",
+      html_text: doc.html_text || "",
+      overrides: doc.overrides || { remove: [], add: [] },
+      approved: !!doc.approved,
+    };
+    // Do NOT log the full payload — it contains the PII this tool exists
+    // to keep out of the host's view. Log only the shape summary.
+    logToolResponse(
+      "get_review_payload",
+      JSON.stringify({
+        session_id: sid,
+        doc_id: doc.doc_id,
+        entity_count: (doc.entities || []).length,
+        original_text_len: (doc.original_text || "").length,
+      }),
+    );
+    return {
+      // Intentionally empty content — even if a buggy host routed the
+      // result to the model, there is nothing for it to read here.
+      content: [{ type: "text" as const, text: "" }],
+      structuredContent: payload,
+    };
   },
 );
 
