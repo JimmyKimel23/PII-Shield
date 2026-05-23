@@ -54,7 +54,7 @@ npm run smoke:sharp-shim
 
 `npm run build:plugin:mac` additionally writes `pii-shield-v<version>-darwin-universal.mcpb` (~82 MB, bundles Node).
 
-At release time these build outputs get renamed on upload to OS-clear names (`pii-shield-v2.0.2-windows-linux.mcpb`, `pii-shield-v2.0.2-macos.mcpb`) — release page handles that.
+At release time these build outputs get renamed on upload to OS-clear names (`pii-shield-v<version>-windows-linux.mcpb`, `pii-shield-v<version>-macos.mcpb`) — release page handles that.
 
 ## Runtime data layout
 
@@ -97,7 +97,7 @@ Means the sharp shim isn't intercepting correctly. Text-only NER doesn't need sh
 
 ### macOS: server immediately disconnects after install
 
-Install the `darwin-universal` variant (`pii-shield-v2.0.2-macos.mcpb` on the release page). Thin `.mcpb` hits Claude Desktop's built-in Node which closes the transport after `initialize` on Tahoe-era builds. The darwin variant ships its own Node and runs via `server.type="binary"` + `launch.sh`.
+Install the `darwin-universal` variant (`pii-shield-v<version>-macos.mcpb` on the release page). Thin `.mcpb` hits Claude Desktop's built-in Node which closes the transport after `initialize` on Tahoe-era builds. The darwin variant ships its own Node and runs via `server.type="binary"` + `launch.sh`.
 
 Debug log lives at `/tmp/piish-banner-debug.log` (Unix) or `%TEMP%\piish-banner-debug.log` (Windows) — written from the very first instruction of `server.bundle.mjs` so it survives the transport dying.
 
