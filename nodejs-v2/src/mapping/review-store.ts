@@ -76,6 +76,21 @@ export interface ReviewData {
 // In-memory store
 const _reviews = new Map<string, ReviewData>();
 
+/**
+ * Per-session disk mtime as observed at the time we last read/wrote the
+ * review file. Used by getReview to detect cross-process writes — when
+ * Claude Desktop spawns multiple MCP server instances (a known Windows
+ * race) each process holds its own _reviews Map; without an mtime check
+ * a process that wrote `approved: false` initially would keep returning
+ * that stale value even after another process wrote `approved: true` to
+ * disk via apply_review_overrides.
+ */
+const _reviewMtimes = new Map<string, number>();
+
+function reviewFilePath(sessionId: string): string {
+  return path.join(PATHS.MAPPINGS_DIR, `review_${sessionId}.json`);
+}
+
 function ensureDir(): void {
   try {
     fs.mkdirSync(PATHS.MAPPINGS_DIR, { recursive: true });
@@ -96,11 +111,19 @@ export function saveReview(sessionId: string, data: ReviewData): void {
 
   try {
     ensureDir();
-    const filePath = path.join(PATHS.MAPPINGS_DIR, `review_${sessionId}.json`);
+    const filePath = reviewFilePath(sessionId);
     const tmpPath = filePath + ".tmp";
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
     fs.renameSync(tmpPath, filePath);
     if (data._disk_write_failed) delete data._disk_write_failed;
+    // Record the mtime we just produced so getReview can later detect
+    // whether ANOTHER process has overwritten the file since this write.
+    try {
+      _reviewMtimes.set(sessionId, fs.statSync(filePath).mtimeMs);
+    } catch {
+      // Stat failure here is non-fatal — the next getReview will simply
+      // observe mtime > -1 (default) and reload, which is correct.
+    }
   } catch (e) {
     const code = (e as NodeJS.ErrnoException)?.code || "UNKNOWN";
     data._disk_write_failed = code;
@@ -177,27 +200,64 @@ function normaliseDoc(doc: Partial<PerDocReview>): PerDocReview {
   };
 }
 
-/** Get review data: memory first, then disk. Auto-migrates legacy format. */
+/**
+ * Get review data: memory first, but cross-checked against the on-disk
+ * mtime so a fresher copy written by ANOTHER server process (Windows
+ * multi-spawn case) supersedes our cached one. Auto-migrates legacy
+ * format on cold reads.
+ *
+ * Decision matrix:
+ *   - File missing on disk       → return memory if any, else null.
+ *   - Memory absent              → cold read from disk, populate caches.
+ *   - Disk mtime <= cached mtime → memory is fresh, fast path.
+ *   - Disk mtime  >  cached mtime → another process wrote; reload + log.
+ */
 export function getReview(sessionId: string): ReviewData | null {
   if (!isSafeSessionId(sessionId)) return null;
-  // Memory first — assumed already normalised (we always save through saveReview).
-  const memData = _reviews.get(sessionId);
-  if (memData) return memData;
 
-  // Disk fallback with legacy migration.
+  const filePath = reviewFilePath(sessionId);
+  const memData = _reviews.get(sessionId);
+
+  // Cheap mtime probe (single syscall on Windows/Linux/macOS).
+  let diskMtime = -1;
   try {
-    const filePath = path.join(PATHS.MAPPINGS_DIR, `review_${sessionId}.json`);
-    if (fs.existsSync(filePath)) {
-      const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-      const migrated = migrateLegacyReview(raw);
-      _reviews.set(sessionId, migrated);
-      return migrated;
-    }
-  } catch (e) {
-    console.error(`[Review] disk read failed: ${e}`);
+    diskMtime = fs.statSync(filePath).mtimeMs;
+  } catch {
+    // File doesn't exist (ENOENT) or unreadable — trust memory.
+    return memData || null;
   }
 
-  return null;
+  const cachedMtime = _reviewMtimes.get(sessionId) ?? -1;
+
+  // Fast path: memory present and disk hasn't been touched since our
+  // last load/write. No reload needed.
+  if (memData && diskMtime <= cachedMtime) {
+    return memData;
+  }
+
+  // Cold read OR cross-process write detected — reload from disk.
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const migrated = migrateLegacyReview(raw);
+    _reviews.set(sessionId, migrated);
+    _reviewMtimes.set(sessionId, diskMtime);
+    if (memData && cachedMtime >= 0) {
+      // Log only when we ACTUALLY supersede an existing cache — the
+      // cold-read case is uninteresting. This trace is the audit-trail
+      // evidence that the multi-process race is being handled.
+      logServer(
+        `[Review] cache invalidated for session=${sessionId}: ` +
+        `disk mtime ${Math.round(diskMtime)} > cached ${Math.round(cachedMtime)} ` +
+        `(another server process wrote; reloading)`,
+      );
+    }
+    return migrated;
+  } catch (e) {
+    console.error(`[Review] disk read failed: ${e}`);
+    // Best-effort: hand back stale memory rather than null when we know
+    // the file exists but we couldn't parse it (transient I/O hiccup).
+    return memData || null;
+  }
 }
 
 /**
