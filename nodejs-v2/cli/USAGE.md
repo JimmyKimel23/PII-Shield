@@ -1007,4 +1007,4 @@ To list at runtime in JSON: `pii-shield scan small.txt --json | jq '.entities[].
 - Source: <https://github.com/gregmos/PII-Shield>
 - License: MIT
 
-The CLI source code is in `nodejs-v2/cli/` of the repo. Dev notes in `nodejs-v2/cli/README.md`.
+The CLI source code is in `nodejs-v2/cli/` of the repo. Dev notes in `nodejs-v2/cli/DEVELOPING.md`.
