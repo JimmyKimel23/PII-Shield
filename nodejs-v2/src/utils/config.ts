@@ -1,5 +1,5 @@
 /**
- * PII Shield v2.0.4 — Configuration
+ * PII Shield v2.1.0 — Configuration
  * Environment variable defaults and constants.
  */
 
@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const VERSION = "2.0.4";
+export const VERSION = "2.1.0";
 
 /**
  * Resolve the persistent data directory for this plugin instance.

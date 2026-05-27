@@ -1,23 +1,20 @@
 /**
- * PII Shield v2.0.0 — DOCX Tracked Changes (REDLINE mode)
+ * PII Shield v2 — DOCX Tracked Changes (REDLINE mode)
  *
- * Uses @ansonlai/docx-redline-js — a pure-JS OOXML reconciliation engine that
- * emits native-looking w:ins/w:del revision markup via word-level diffing.
- * Runs headless with @xmldom/xmldom (no browser / no Python).
+ * Uses @adeu/core — a TypeScript engine purpose-built for LLM-driven contract
+ * redlining. Emits native w:ins/w:del revisions with proper w:id/w:author/
+ * w:date/w16du:dateUtc, runs atomic batch validation, and covers main body +
+ * headers/footers/footnotes automatically via DocumentMapper.
  *
- * For accept/reject we keep a small pure-JS path (@xmldom/xmldom only) since
- * those operations are trivial: remove/unwrap w:ins/w:del nodes in place.
+ * Accept/reject of existing revisions stays in pure @xmldom/xmldom — adeu only
+ * exposes per-id accept and accept_all_revisions, not bulk reject.
  */
 import path from "node:path";
 import fs from "node:fs";
-import JSZip from "jszip";
+import type JSZip from "jszip";
 import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import type { Document, Element } from "@xmldom/xmldom";
-import {
-  configureXmlProvider,
-  setDefaultAuthor,
-} from "@ansonlai/docx-redline-js";
-import { applyOperationToDocumentXml } from "@ansonlai/docx-redline-js/services/standalone-operation-runner.js";
+import { DocumentObject, RedlineEngine, BatchValidationError } from "@adeu/core";
 import { loadDocx, saveDocx } from "./docx-reader.js";
 
 const WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -34,55 +31,14 @@ interface RedlineOptions {
   date?: string;
 }
 
-// One-time init — docx-redline-js needs DOMParser/XMLSerializer injected in Node.
-let _xmlConfigured = false;
-function ensureXmlConfigured(): void {
-  if (_xmlConfigured) return;
-  configureXmlProvider({ DOMParser, XMLSerializer });
-  _xmlConfigured = true;
-}
-
-/**
- * Apply a sequence of {oldText → newText} tracked changes to a full
- * word/document.xml string. Each change is fed through
- * applyOperationToDocumentXml, threading the redlined output into the next
- * call so later changes see the already-annotated XML.
- *
- * Returns the final XML string and the count of changes actually applied
- * (hasChanges=true on that op).
- */
-async function applyChangesToDocumentXml(
-  documentXml: string,
-  changes: TrackedChange[],
-  author: string,
-): Promise<{ xml: string; applied: number }> {
-  let xml = documentXml;
-  let applied = 0;
-  for (const change of changes) {
-    if (!change.oldText) continue;
-    try {
-      const res: any = await applyOperationToDocumentXml(
-        xml,
-        { type: "redline", target: change.oldText, modified: change.newText },
-        author,
-        null,
-        { generateRedlines: true },
-      );
-      if (res && typeof res.documentXml === "string") {
-        xml = res.documentXml;
-        if (res.hasChanges) applied++;
-      }
-    } catch (e) {
-      console.error(`[REDLINE] change failed for "${change.oldText.slice(0, 40)}": ${e}`);
-    }
-  }
-  return { xml, applied };
-}
-
 /**
  * Apply tracked changes to a DOCX file.
  * Each change wraps old text in w:del and adds new text in w:ins.
  * The result is a .docx that shows revision marks in Microsoft Word.
+ *
+ * Changes are applied one at a time so a single failed or ambiguous target
+ * does not abort the whole batch — adeu's process_batch is atomic and throws
+ * BatchValidationError when any edit cannot be uniquely matched.
  *
  * @param docxPath Path to the input .docx file
  * @param changes Array of {oldText, newText} changes to apply
@@ -94,57 +50,43 @@ export async function applyTrackedChanges(
   changes: TrackedChange[],
   options: RedlineOptions = {},
 ): Promise<string> {
-  ensureXmlConfigured();
   const author = options.author || "PII Shield";
-  setDefaultAuthor(author);
 
-  // Sort changes by length descending so longer matches win over prefixes.
+  // Sort changes by length descending so longer matches win over prefixes —
+  // if "Acme Corporation" and "Acme" are both targets, apply the longer one
+  // while it still exists in the document.
   const sortedChanges = [...changes].sort((a, b) => b.oldText.length - a.oldText.length);
 
   const buf = fs.readFileSync(docxPath);
-  const zip = await JSZip.loadAsync(buf);
-
-  const mainPath = "word/document.xml";
-  const mainXml = await zip.file(mainPath)?.async("string");
-  if (!mainXml) {
-    throw new Error(`DOCX missing ${mainPath}: ${docxPath}`);
+  const doc = await DocumentObject.load(buf);
+  const engine = new RedlineEngine(doc, author);
+  // Engine stamps w:date / w16du:dateUtc from engine.timestamp (public field,
+  // ISO-8601). Override if the caller pinned a date for reproducible output.
+  if (options.date) {
+    (engine as { timestamp: string }).timestamp = options.date;
   }
 
   let applied = 0;
-  const { xml: newMain, applied: mainApplied } = await applyChangesToDocumentXml(mainXml, sortedChanges, author);
-  zip.file(mainPath, newMain);
-  applied += mainApplied;
-  console.error(`[REDLINE] applied ${mainApplied} tracked change(s) to ${mainPath}`);
-
-  // Headers and footers — same tracked-changes pass on each part separately.
-  // Matches the old Python sidecar's _walk_paragraphs behaviour (which iterated
-  // section.header / section.first_page_header / section.even_page_header and
-  // the corresponding footers). Without this, PII in colontituly (signatures,
-  // recurring party identifiers) would appear redlined in the body but
-  // untouched in headers/footers.
-  const partPaths: string[] = [];
-  zip.forEach((relPath) => {
-    if (/^word\/header\d+\.xml$/.test(relPath) || /^word\/footer\d+\.xml$/.test(relPath)) {
-      partPaths.push(relPath);
-    }
-  });
-  for (const partPath of partPaths) {
-    const partXml = await zip.file(partPath)?.async("string");
-    if (!partXml) continue;
-    const { xml: newPart, applied: partApplied } = await applyChangesToDocumentXml(
-      partXml, sortedChanges, author,
-    );
-    zip.file(partPath, newPart);
-    applied += partApplied;
-    if (partApplied > 0) {
-      console.error(`[REDLINE] applied ${partApplied} tracked change(s) to ${partPath}`);
+  for (const change of sortedChanges) {
+    if (!change.oldText) continue;
+    try {
+      const result = engine.process_batch([
+        { type: "modify", target_text: change.oldText, new_text: change.newText },
+      ]) as { edits_applied?: number; skipped_details?: string[] };
+      const editsApplied = typeof result?.edits_applied === "number" ? result.edits_applied : 1;
+      applied += editsApplied;
+    } catch (e: unknown) {
+      const reason = e instanceof BatchValidationError ? "rejected" : "failed";
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[REDLINE] change ${reason} for "${change.oldText.slice(0, 40)}": ${msg}`);
     }
   }
+  console.error(`[REDLINE] applied ${applied} tracked change(s) across ${docxPath}`);
 
+  const outBuf = await doc.save();
   const dir = path.dirname(docxPath);
   const stem = path.basename(docxPath, path.extname(docxPath));
   const outPath = path.join(dir, `${stem}_tracked_changes.docx`);
-  const outBuf = await zip.generateAsync({ type: "nodebuffer" });
   fs.writeFileSync(outPath, outBuf);
   return outPath;
 }

@@ -158,7 +158,7 @@ async function build() {
     entryPoints: [path.join(ROOT, "src/index.ts")],
     bundle: true,
     platform: "node",
-    target: "node18",
+    target: "node22",
     format: "esm",
     outfile: path.join(DIST, "server.bundle.mjs"),
     sourcemap: false,
@@ -192,10 +192,14 @@ async function build() {
         // own logs in that dir DO survive — write next to them.
         'import * as __dbg_fs from "fs";',
         'import * as __dbg_path from "path";',
-        'import { createRequire } from "module";',
+        // Alias createRequire — fflate (transitive via @adeu/core) ships its
+        // own top-level `import { createRequire } from "module"` in
+        // node_modules/fflate/esm/index.mjs, so a bare `createRequire` here
+        // would collide and produce SyntaxError: Identifier already declared.
+        'import { createRequire as __piiCreateRequire } from "module";',
         'import { fileURLToPath as __esm_fileURLToPath } from "url";',
         'import * as __early_os from "os";',
-        'const require = createRequire(import.meta.url);',
+        'const require = __piiCreateRequire(import.meta.url);',
         'const __filename = __esm_fileURLToPath(import.meta.url);',
         'const __dirname = __dbg_path.dirname(__filename);',
         'function __resolveDbgPath() {',

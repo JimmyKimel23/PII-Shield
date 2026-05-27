@@ -7,7 +7,7 @@
     <a href="https://github.com/gregmos/PII-Shield/stargazers"><img src="https://img.shields.io/github/stars/gregmos/PII-Shield?style=flat-square&color=yellow" alt="GitHub Stars"></a>
     <a href="https://github.com/gregmos/PII-Shield/network/members"><img src="https://img.shields.io/github/forks/gregmos/PII-Shield?style=flat-square" alt="GitHub Forks"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT"></a>
-    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-18%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 18+"></a>
+    <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 22+"></a>
   </p>
 </p>
 
@@ -78,7 +78,7 @@ pii-shield deanonymize contract_anonymized.pdf --session 2026-04-29_101617_9f40
 | `pii-shield install-model [--yes]` | Download/extract the GLiNER ONNX model. |
 | `pii-shield doctor [--json]` | Check Node, deps, model, paths. |
 
-The CLI uses the same engine, mappings, and audit log as the MCP variants. Sessions are interchangeable: anonymize on the CLI, deanonymize from Claude Desktop, or vice versa — the mapping store is shared (`~/.pii_shield/mappings/`). Requires Node 18+.
+The CLI uses the same engine, mappings, and audit log as the MCP variants. Sessions are interchangeable: anonymize on the CLI, deanonymize from Claude Desktop, or vice versa — the mapping store is shared (`~/.pii_shield/mappings/`). Requires Node 22+.
 
 ## Claude Desktop / Claude Code
 
@@ -304,7 +304,7 @@ PII-Shield/
 │   │   └── smoke-sharp-shim.mjs                     # Clean-install sharp-shim smoke
 │   ├── manifest.json                                 # MCPB manifest (server.type=node)
 │   └── package.json
-├── .github/workflows/test.yml                        # Node CI (ubuntu + windows + macos, Node 18 + 20)
+├── .github/workflows/test.yml                        # Node CI (ubuntu + windows + macos, Node 22 + 24)
 ├── LICENSE
 └── README.md
 ```

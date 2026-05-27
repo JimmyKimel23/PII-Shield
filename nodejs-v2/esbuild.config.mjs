@@ -17,7 +17,7 @@ await build({
   entryPoints: ["src/index.ts"],
   bundle: true,
   platform: "node",
-  target: "node18",
+  target: "node22",
   format: "esm",
   outfile: "dist/server.bundle.mjs",
   sourcemap: true,
@@ -32,13 +32,17 @@ await build({
   loader: { ".html": "text" },
   banner: {
     js: [
-      'import { createRequire } from "module";',
+      // Alias createRequire — fflate (transitive via @adeu/core) ships its
+      // own top-level `import { createRequire } from "module"` in
+      // node_modules/fflate/esm/index.mjs, so a bare `createRequire` here
+      // would collide and produce SyntaxError: Identifier already declared.
+      'import { createRequire as __piiCreateRequire } from "module";',
       'import { fileURLToPath as __esm_fileURLToPath } from "url";',
       'import { dirname as __esm_dirname } from "path";',
       'import * as __early_fs from "fs";',
       'import * as __early_path from "path";',
       'import * as __early_os from "os";',
-      'const require = createRequire(import.meta.url);',
+      'const require = __piiCreateRequire(import.meta.url);',
       'const __filename = __esm_fileURLToPath(import.meta.url);',
       'const __dirname = __esm_dirname(__filename);',
       // Install crash handlers BEFORE any other code runs.

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "pii-shield-v2",
   "display_name": "PII Shield v2",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "Anonymize PII in documents. Requires one-time model install via PowerShell/bash one-liner — see README for 3-step setup. Pure Node.js, no Python dependency.",
   "long_description": "MCP server that anonymizes documents before Claude sees them and restores real data after analysis. PII never enters the API — only file paths and session IDs are exchanged. Uses GLiNER zero-shot NER via ONNX Runtime for high-quality entity recognition in legal documents, with Human-in-the-Loop review via an in-chat MCP Apps panel (no browser required). Supports PDF, DOCX (with tracked changes / redline), and plain text. Includes 17 EU pattern recognizers, entity deduplication, chunked processing for large documents, and full local audit logging. The GLiNER model (~634 MB) is installed separately via `install-model.ps1` (Windows) or `install-model.sh` (macOS/Linux) — one command, ~2-5 min. This keeps the plugin tiny (<2 MB, instant install in Claude Desktop) and decouples model updates from code. First-run also installs native npm deps (onnxruntime-node + transformers, ~1–2 min). Pure Node.js, no Python dependency.",
   "author": {
@@ -105,7 +105,7 @@
     "claude_desktop": ">=0.10.0",
     "platforms": ["win32", "darwin", "linux"],
     "runtimes": {
-      "node": ">=18.0.0"
+      "node": ">=22.0.0"
     }
   }
 }

@@ -44,7 +44,7 @@ npm run build:cli
 
 `build-cli.mjs` runs in three steps:
 1. `vite build INPUT=review-cli.html` — single-file UI bundle. The `review-cli.html` reuses `src/review-app.ts` from the MCP build; vite alias swaps `@modelcontextprotocol/ext-apps` for `ui/src/cli-app-shim.ts` (HTTP-backed `App` class). See `vite.config.ts` `resolve.alias`.
-2. `esbuild cli/src/bin.ts → dist/cli/bin.mjs` — esm bundle, Node 18 target, banner adds shebang + `createRequire` polyfill so CJS deps (commander, cli-progress) load. The HTML bundle from step 1 is inlined via `loader: { ".html": "text" }`.
+2. `esbuild cli/src/bin.ts → dist/cli/bin.mjs` — esm bundle, Node 22 target, banner adds shebang + `createRequire` polyfill so CJS deps (commander, cli-progress) load. The HTML bundle from step 1 is inlined via `loader: { ".html": "text" }`.
 3. `chmod +x dist/cli/bin.mjs` (POSIX only).
 
 ## Local install
@@ -87,7 +87,7 @@ All other invariants (mapping shape, session_id format, `~/.pii_shield/` dirs, G
 
 ## Design choices
 
-- **No native binaries / Docker / Homebrew yet.** npm-only is the cheapest distribution and the easiest to update. Adding standalone binaries via `bun build --compile` is a follow-up if Node 18+ adoption becomes a barrier.
+- **No native binaries / Docker / Homebrew yet.** npm-only is the cheapest distribution and the easiest to update. Adding standalone binaries via `bun build --compile` is a follow-up if Node 22+ adoption becomes a barrier.
 - **HITL is browser-only — no TUI.** Reusing `review-app.ts` (~1500 lines of vetted UI code) via vite alias is far cheaper than building a terminal UI from scratch. SSH / headless users use `--no-review` or `PII_SKIP_REVIEW=true`.
 - **Multi-doc batches are sequential.** `engine.anonymizeText` is stateful (shared `PlaceholderState`), and NER inference is single-threaded inside ONNX Runtime. Parallelizing across files would scramble cross-doc placeholder consistency. Expected throughput: ~10s/doc on CPU after warm cache, so ~5 min for 30 docs.
 - **`review-overrides.ts` duplicates ~50 lines of `src/index.ts`** intentionally — the MCP entry point starts a stdio server on import, so we can't pull from there without breaking CLI startup. If the duplication grows, lift the helper into `src/engine/hitl-overrides.ts` and import from both sides.

@@ -76,7 +76,7 @@ await build({
   entryPoints: [path.join(ROOT, "cli/src/bin.ts")],
   bundle: true,
   platform: "node",
-  target: "node18",
+  target: "node22",
   format: "esm",
   outfile: path.join(DIST, "cli", "bin.mjs"),
   sourcemap: false,

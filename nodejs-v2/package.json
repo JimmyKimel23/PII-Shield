@@ -1,6 +1,6 @@
 {
   "name": "pii-shield",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "type": "module",
   "description": "Anonymize PII in legal documents locally — Node.js CLI (GLiNER NER, EU/UK/US patterns, .docx/.pdf/.txt, HITL review). MCP plugin distributed separately as a .mcpb.",
   "bin": {
@@ -38,7 +38,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@modelcontextprotocol/ext-apps": "^1.6.0",
-    "@ansonlai/docx-redline-js": "^0.1.4",
+    "@adeu/core": "^1.8.0",
     "@xenova/transformers": "2.17.2",
     "@xmldom/xmldom": "^0.9.0",
     "cli-progress": "^3.12.0",
@@ -71,7 +71,7 @@
     "onnxruntime-web": "1.22.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "author": {
     "name": "Grigorii Moskalev"
